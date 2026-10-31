@@ -185,6 +185,21 @@ export function config(override?: UserConfig): UserConfig {
 	return mergeOverride(project, override)
 }
 
+export function guides(override?: UserConfig): UserConfig {
+	const project: UserConfig = {
+		resolve,
+		test: {
+			name: { label: 'guides', color: 'green' },
+			include: ['tests/guides.test.ts'],
+			exclude: ['tests/src/**/*.test.ts', 'tests/app/**/*.test.ts', 'tests/setup.test.ts'],
+			setupFiles: ['./tests/setup.ts'],
+			environment: 'node',
+			browser: { enabled: false },
+		},
+	}
+	return mergeOverride(project, override)
+}
+
 export function distribution(override?: UserConfig): UserConfig {
 	const project: UserConfig = {
 		resolve,
@@ -230,6 +245,6 @@ export default defineConfig({
 	test: {
 		// Vitest 5.0.5 hands cached code to the module runner as bytes, which breaks stack mapping.
 		fsModuleCache: false,
-		projects: [srcCore, policy, config, distribution, probe],
+		projects: [srcCore, policy, config, guides, distribution, probe],
 	},
 })
