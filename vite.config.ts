@@ -1,0 +1,235 @@
+import type { PluginOption, UserConfig } from 'vite'
+import { mergeConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
+import manifest from './package.json' with { type: 'json' }
+import tsconfig from './tsconfig.json' with { type: 'json' }
+import { enforceBuildLog } from './configs/helpers.js'
+import { fileURLToPath, URL } from 'node:url'
+
+export function resolveWorkspacePath(relativePath: string): string {
+	return fileURLToPath(new URL(relativePath, import.meta.url))
+}
+
+const peerDependencies = 'peerDependencies' in manifest ? manifest.peerDependencies : undefined
+if (
+	peerDependencies !== undefined &&
+	(typeof peerDependencies !== 'object' ||
+		peerDependencies === null ||
+		Array.isArray(peerDependencies))
+) {
+	throw new Error('package peerDependencies must be an object')
+}
+export const peers: readonly string[] =
+	peerDependencies === undefined ? [] : Object.keys(peerDependencies)
+
+const resolve = {
+	alias: Object.fromEntries(
+		Object.entries(tsconfig.compilerOptions.paths).map(([key, values]) => {
+			const [path] = values
+			if (path === undefined) throw new Error('tsconfig path alias ' + key + ' has no target')
+			return [key, resolveWorkspacePath(path)]
+		}),
+	),
+}
+
+// Merges a caller's override onto the configuration a factory declares, so a
+// package's own configuration reaches the factory through its parameter instead of
+// wrapping the call from outside.
+//
+// Vitest calls every registered project factory with its own invocation record —
+// `command`, `mode`, `isSsrBuild`, `isPreview` — so a factory that also takes an
+// override receives that record in the same position. A `UserConfig` declares `mode`
+// but not `command`, and the invocation record always carries both, so a value
+// carrying the pair is that record rather than an override. The merge returns the
+// base in the record's `mode` and carries none of the record's other fields. Vitest
+// runs a project that declares no `mode` in its own run mode, `test`, rather than in
+// the `--mode` value it was invoked with, so a distribution proof run with
+// `--mode release` would read `test` and skip where it must fail. A record whose
+// `mode` is not a string throws. The `tests/config.test.ts` file drives every
+// registered factory through it.
+//
+// `mergeConfig` concatenates arrays, so an override carrying `plugins` would otherwise
+// add a second copy of a plugin the base already declares. Only named top-level
+// objects replace a base plugin of the same name, in the base's position, and one
+// override entry is taken at most once. An entry no base position took appends in its
+// written order; the caller's own entries never merge with each other. Nested arrays,
+// promises, falsy entries, and anonymous objects pass through unchanged. An override
+// cannot remove a base plugin. Every key other than `plugins` merges as `mergeConfig`
+// merges it, so an override's arrays elsewhere concatenate with the base's rather than
+// replacing them.
+export function mergeOverride(base: UserConfig, override?: UserConfig): UserConfig {
+	if (
+		override !== undefined &&
+		'command' in override &&
+		'mode' in override &&
+		typeof override.mode !== 'string'
+	) {
+		throw new Error('The project invocation carries no string mode')
+	}
+	const effective: UserConfig | undefined =
+		override !== undefined && 'command' in override && typeof override.mode === 'string'
+			? { mode: override.mode }
+			: override
+	const merged: UserConfig = effective === undefined ? { ...base } : mergeConfig(base, effective)
+	const name = merged.test?.name
+	const label = typeof name === 'string' ? name : name?.label
+	const browser = merged.test?.browser
+	const named: UserConfig =
+		label !== undefined && browser?.instances !== undefined
+			? {
+					...merged,
+					test: {
+						...merged.test,
+						browser: {
+							...browser,
+							instances: browser.instances.map((instance) => ({
+								...instance,
+								name: instance.name ?? `${label} (${instance.browser})`,
+							})),
+						},
+					},
+				}
+			: merged
+	if (named.plugins === undefined || effective === undefined) return named
+	const candidates = [...(effective.plugins ?? [])]
+	const bases = [...(base.plugins ?? [])]
+	// A base plugin takes the first candidate of its own name that no earlier base plugin took, and
+	// candidates of other names never compete for it, so its pick is the candidate whose rank among
+	// its name equals the number of earlier base plugins sharing that name.
+	const chosen = bases.map((plugin, position) =>
+		isNamedPlugin(plugin)
+			? candidates
+					.flatMap((candidate, index) =>
+						isNamedPlugin(candidate) && candidate.name === plugin.name ? [index] : [],
+					)
+					.at(
+						bases
+							.slice(0, position)
+							.filter((earlier) => isNamedPlugin(earlier) && earlier.name === plugin.name).length,
+					)
+			: undefined,
+	)
+	return {
+		...named,
+		plugins: [
+			...bases.map((plugin, position) => {
+				const index = chosen[position]
+				return index === undefined ? plugin : (candidates[index] ?? plugin)
+			}),
+			...candidates.filter((_, index) => !chosen.includes(index)),
+		],
+	}
+}
+
+function isNamedPlugin(plugin: PluginOption): plugin is { name: string } {
+	return (
+		typeof plugin === 'object' &&
+		plugin !== null &&
+		!Array.isArray(plugin) &&
+		!('then' in plugin && typeof plugin.then === 'function') &&
+		'name' in plugin &&
+		typeof plugin.name === 'string'
+	)
+}
+
+export function srcCore(override?: UserConfig): UserConfig {
+	const project: UserConfig = {
+		resolve,
+		publicDir: false,
+		build: {
+			emptyOutDir: true,
+			sourcemap: true,
+			minify: false,
+			rolldownOptions: { onLog: enforceBuildLog },
+		},
+		test: {
+			name: { label: 'src:core', color: 'magenta' },
+			include: ['tests/src/core/**/*.test.ts'],
+			setupFiles: ['./tests/setup.ts'],
+			environment: 'node',
+			browser: { enabled: false },
+		},
+	}
+	return mergeOverride(project, override)
+}
+
+export function policy(override?: UserConfig): UserConfig {
+	const project: UserConfig = {
+		resolve,
+		test: {
+			name: { label: 'policy', color: 'white' },
+			include: ['tests/policy.test.ts'],
+			setupFiles: ['./tests/setup.ts'],
+			environment: 'node',
+			browser: { enabled: false },
+		},
+	}
+	return mergeOverride(project, override)
+}
+
+export function config(override?: UserConfig): UserConfig {
+	const project: UserConfig = {
+		resolve,
+		test: {
+			name: { label: 'config', color: 'yellow' },
+			include: ['tests/config.test.ts'],
+			setupFiles: ['./tests/setup.ts'],
+			environment: 'node',
+			browser: { enabled: false },
+			// A config test validates every target wrapper, spawns the real linter twice under
+			// 15-second child caps, and rolls one face up through the compiler and the extractor it
+			// spawns, so this budget clears the capped pair with room for a contended host.
+			testTimeout: 60_000,
+		},
+	}
+	return mergeOverride(project, override)
+}
+
+export function distribution(override?: UserConfig): UserConfig {
+	const project: UserConfig = {
+		resolve,
+		test: {
+			name: { label: 'distribution', color: 'cyan' },
+			include: ['tests/distribution.test.ts'],
+			setupFiles: ['./tests/setup.ts'],
+			environment: 'node',
+			testTimeout: 120_000,
+			hookTimeout: 120_000,
+			fileParallelism: false,
+			sequence: { groupOrder: 1 },
+		},
+	}
+	return mergeOverride(project, override)
+}
+
+// A workbench, not a proof. No gate selects this project. Run in test mode by the
+// `test:probe` script, it collects `tmp/probes/**/*.test.ts`. Run in benchmark mode by the
+// `test:bench` script, it collects `*.bench.ts` files under `tmp/probes` and `tests`.
+// Each benchmark is a regular test that uses its context's `bench` fixture and awaits
+// `bench(name, options, fn).run()` or `bench.compare(...)`.
+export function probe(override?: UserConfig): UserConfig {
+	const project: UserConfig = {
+		resolve,
+		test: {
+			name: { label: 'probe', color: 'black' },
+			include: ['tmp/probes/**/*.test.ts'],
+			setupFiles: ['./tests/setup.ts'],
+			environment: 'node',
+			browser: { enabled: false },
+			fileParallelism: false,
+			sequence: { groupOrder: 1 },
+			pool: 'threads',
+			benchmark: { include: ['tmp/probes/**/*.bench.ts', 'tests/**/*.bench.ts'] },
+		},
+	}
+	return mergeOverride(project, override)
+}
+
+export default defineConfig({
+	resolve,
+	test: {
+		// Vitest 5.0.5 hands cached code to the module runner as bytes, which breaks stack mapping.
+		fsModuleCache: false,
+		projects: [srcCore, policy, config, distribution, probe],
+	},
+})
