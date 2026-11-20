@@ -1,6 +1,6 @@
 {
 	"name": "@orkestrel/jsonrpc",
-	"version": "0.0.5",
+	"version": "0.0.6",
 	"description": "The @orkestrel/jsonrpc package.",
 	"keywords": [],
 	"homepage": "https://github.com/orkestrel/jsonrpc#readme",
